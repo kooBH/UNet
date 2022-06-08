@@ -9,6 +9,8 @@ sys.path.append("..")
 from  utils.TCN import TCN
 from torch import Tensor
 
+from UNet_m import Encdoer, Decoder, EncoderDecoderAttention, ResPath
+
 class Unet20(nn.Module):
     def __init__(self, 
                  input_channels,
@@ -53,8 +55,13 @@ class Unet20(nn.Module):
         self.decoders = []
 
         for i in range(self.model_length):
-            module = Decoder(self.dec_channels[i] + self.enc_channels[self.model_length - i], self.dec_channels[i + 1], kernel_size=self.dec_kernel_sizes[i],
-                             stride=self.dec_strides[i], padding=self.dec_paddings[i], output_padding=self.dec_output_paddings[i],activation=activation)
+            module = Decoder(
+                self.dec_channels[i] + self.enc_channels[self.model_length - i], self.dec_channels[i + 1], 
+                kernel_size=self.dec_kernel_sizes[i],
+                stride=self.dec_strides[i], 
+                padding=self.dec_paddings[i], 
+                output_padding=self.dec_output_paddings[i],
+                activation=activation)
             self.add_module("decoder{}".format(i), module)
             self.decoders.append(module)
 
