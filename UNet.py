@@ -4,19 +4,20 @@
 from shutil import ExecError
 import torch
 import torch.nn as nn
+import numpy as np
 import sys
 sys.path.append("..")
-from  utils.TCN import TCN
 from torch import Tensor
 
-from UNet_m import Encdoer, Decoder, EncoderDecoderAttention, ResPath
+from .UNet_m import Encoder, Decoder, EncoderDecoderAttention, ResPath, OberservedAddition
 
-class Unet20(nn.Module):
+class UNet(nn.Module):
     def __init__(self, 
-                 input_channels,
+                 input_channels=1,
                  dropout=0.2,
-                 activation="PRelu",
-                 mask_acti="Softplus",
+                 activation="PReLU",
+                 mask_activation="Softplus",
+                 bottleneck_type="None",
                  n_fft=512,
                  res_path="None",
                  model_complexity=45,
@@ -25,16 +26,22 @@ class Unet20(nn.Module):
                  use_EDA=False, # Encoder Decoder Attention
                  OA_method = "none",
                  OA_dim = 257,
-                 OA_factor=0.3
+                 OA_factor=0.3,
+                 device="cuda:0"
                  ):
         super().__init__()
 
         self.nhfft = n_fft/2 + 1
+        self.input_channels = input_channels
 
         self.model_complexity = int(model_complexity // 1.414)
 
         self.encoders = []
         self.model_length = model_depth // 2
+
+        self.set_size(model_depth)
+
+        self.device =device
 
 
         if use_EDA :
@@ -65,6 +72,9 @@ class Unet20(nn.Module):
             self.add_module("decoder{}".format(i), module)
             self.decoders.append(module)
 
+        if res_path == "None" : 
+            self.use_respath=False
+
         if self.use_respath : 
             self.respaths = [] 
             for i in range(self.model_length) :
@@ -73,19 +83,19 @@ class Unet20(nn.Module):
                 self.respaths.append(module)
 
         ## Bottlenect
-        self.bottleneck = hp.model.UNET.bottleneck
-        if hp.model.UNET.bottleneck == 'None' :
+        self.bottleneck_type = bottleneck_type
+        if bottleneck_type == 'None' :
             self.bottleneck = nn.Identity()
-        elif hp.model.UNET.bottleneck == 'GRU':
+        elif bottleneck_type == 'GRU':
             # case for F = 513 
-            self.bottleneck = nn.GRU(input_size  = 128*3,hidden_size = 64*3,num_layers = 2,bias=True,batch_first=True,bidirectional=True,dropout =hp.model.UNET.bottleneck_dropout)
-        elif hp.model.UNET.bottleneck == 'LSTM':
+            self.bottleneck = nn.GRU(input_size  = 128*3,hidden_size = 64*3,num_layers = 2,bias=True,batch_first=True,bidirectional=True,dropout =dropout)
+        elif bottleneck_type == 'LSTM':
             # case for F = 513 
-            self.bottleneck = nn.LSTM(input_size  = 128*3,hidden_size = 64*3,num_layers = 2,bias=True,batch_first=True,bidirectional=True,dropout=hp.model.UNET.bottleneck_dropout)
-        elif hp.model.UNET.bottleneck == 'TCN':
+            self.bottleneck = nn.LSTM(input_size  = 128*3,hidden_size = 64*3,num_layers = 2,bias=True,batch_first=True,bidirectional=True,dropout=dropout)
+        elif bottleneck_type == 'TCN':
             self.bottleneck = TCN(c_in=128*3, c_out=[128*3,128*3])
         else :
-            raise Exception("ERROR:UNET::bottleneck {} is not implemented".format(self.bottleneck))
+            raise Exception("ERROR:UNET::bottleneck {} is not implemented".format(self.bottleneck_type))
 
         
         linear = nn.Conv2d(self.dec_channels[-1], 1, 1)
@@ -101,6 +111,8 @@ class Unet20(nn.Module):
             self.mask_acti = nn.SiLU()
         elif mask_activation == 'none':
             self.mask_acti = nn.Identity()
+        elif mask_activation == 'PReLU':
+            self.mask_acti = nn.PReLU()
         else :
             raise Exception('ERROR:Unknown activation : ' + str(activation))
 
@@ -113,6 +125,10 @@ class Unet20(nn.Module):
     def forward(self, x):        
         # ipnut : [ Batch Channel Freq Time]
 
+        # Time must be multiple of 16
+        len_orig = x.shape[-1]
+        need =  int(16*np.floor(len_orig/16)+16) - len_orig
+        x = torch.nn.functional.pad(x,(0,need))
         # Encoder 
         x_skip = []
         for i, encoder in enumerate(self.encoders):
@@ -125,7 +141,7 @@ class Unet20(nn.Module):
         # x_skip : x0=input x1 ... x9
 
         #print("fully encoded ",x.shape)
-        if self.hp.model.UNET.bottleneck == 'GRU' or self.hp.model.UNET.bottleneck == 'LSTM':
+        if self.bottleneck_type == 'GRU' or self.bottleneck_type == 'LSTM':
             # [B, C, F, T]
             B, C, F, T = x.shape
             x = torch.permute(x,(0,3,1,2))
@@ -133,7 +149,7 @@ class Unet20(nn.Module):
             p,_ = self.bottleneck(x)
             p = torch.reshape(p,(B,T,C,F))
             p = torch.permute(p,(0,2,3,1))
-        elif self.hp.model.UNET.bottleneck == 'TCN':
+        elif self.bottleneck_type == 'TCN':
             B, C, F, T = x.shape
             x = torch.reshape(x,(B,C*F,T))
             p = self.bottleneck(x)
@@ -158,7 +174,7 @@ class Unet20(nn.Module):
         # Observation Addition
         mask_oberserved = torch.ones(mask.shape).to(self.device)
         mask = self.OA(mask,mask_oberserved)
-        return mask[:,0,:,:]
+        return mask[:,:,:,:len_orig]
 
     def set_size(self,depth=20):
         if depth == 10 : 

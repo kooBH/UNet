@@ -1,6 +1,7 @@
 # Modules for UNet
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 class ComplexConv2d(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, **kwargs):
@@ -119,7 +120,7 @@ class OberservedAddition(nn.Module):
         elif self.method == 'linear' :
             # concate on feature
             return self.OA(torch.cat((x,o),dim=2))
-        elif self.method == 'const' or self.metohd == 'fixed':
+        elif self.method == 'const' or self.method == 'fixed':
             return x + self.factor * o
         else :
             return self.OA(x)
