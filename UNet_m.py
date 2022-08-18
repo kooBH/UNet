@@ -127,15 +127,21 @@ class OberservedAddition(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding=None, padding_mode="zeros",dropout=0,activation="LeakyReLU"):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding=None, dilation=1,norm="BatchNorm2d",padding_mode="zeros",dropout=0,activation="LeakyReLU"):
         super().__init__()
         if padding is None:
             padding = [(i - 1) // 2 for i in kernel_size]  # 'SAME' padding
             
         conv = nn.Conv2d
-        bn = nn.BatchNorm2d
 
-        self.conv = conv(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, padding_mode=padding_mode)
+        if norm == "BatchNorm2d": 
+            bn = nn.BatchNorm2d
+        elif norm == "InstanceNorm2d":
+            bn = nn.InstanceNorm2d
+        else :
+            raise Exception("ERROR::Encoder: unknown normalization - {}".format(norm))
+
+        self.conv = conv(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation, padding_mode=padding_mode)
         self.bn = bn(out_channels)
         self.acti = None
         if activation == "LeakyReLU":
@@ -160,13 +166,13 @@ class Encoder(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, output_padding,padding=(0, 0),activation="LeakyReLU"):
+    def __init__(self, in_channels, out_channels, kernel_size, stride,padding=(0, 0),dilation=1,output_padding=(0,0),activation="LeakyReLU"):
         super().__init__()
        
         tconv = nn.ConvTranspose2d
         bn = nn.BatchNorm2d
         
-        self.transconv = tconv(in_channels, out_channels, kernel_size=kernel_size, stride=stride, output_padding=output_padding,padding=padding)
+        self.transconv = tconv(in_channels, out_channels, kernel_size=kernel_size, stride=stride, dilation=dilation, output_padding=output_padding,padding=padding)
         self.bn = bn(out_channels)
         self.acti = None
         if activation == "LeakyReLU":
@@ -245,3 +251,123 @@ class ResPath(nn.Module):
         y4 = self.resconv4(z3)
         z4 = x4+y4
         return z4
+
+
+
+"""
+https://arxiv.org/abs/1608.06993v5
+Huang, Gao, et al. "Densely connected convolutional networks." Proceedings of the IEEE conference on computer vision and pattern recognition. 2017.
+"""
+class DenseBlock(nn.Module):
+    def __init__(self, n_channel,norm="BatchNorm2d",dropout=0.0,activation="LeakyReLU",depth=5):
+        super().__init__()
+
+        self.depth = depth
+
+        ## Conv 2d
+        self.seq_conv = []
+        for i in range(depth):
+            module = nn.conv2d(n_channel+i*n_channel,n_channel,kernel_size=(3,3),stride=(1,1),padding=(1,1))
+            seq.append(module)
+
+        ## Normalization
+        if norm == "BatchNorm2d": 
+            bn_module = nn.BatchNorm2d
+        elif norm == "InstanceNorm2d":
+            bn_module = nn.InstanceNorm2d
+        else :
+            raise Exception("ERROR::Encoder: unknown nromalization - {}".format(norm))
+        self.bn = bn_module(n_channel)
+
+        if activation == "LeakyReLU":
+            self.acti = nn.LeakyReLU(inplace=True)
+        elif activation == "SiLU":
+            self.acti = nn.SiLU(inplace=True)
+        elif activation == 'Softplus':
+            self.acti = nn.Softplus()
+        elif activation == 'PReLU':
+            self.acti = nn.PReLU()
+        elif activation == 'ReLU':
+            self.acti = nn.ReLU()
+        else :
+            raise Exception("ERROR::Encoder:Unknown activation type " + str(activation))
+
+    def forward(self,x):
+
+        skip = []
+        y = self.seq_conv[i](x)
+        skip.append(y)
+
+        for i in range(1,self.depth) : 
+            y = self.seq_conv[i](torch.cat(x,skip),dim=1)
+            skip.append(y)
+
+        y0 = self.conv1(x)
+        
+        y0_x = torch.cat((x,y0),dim=1)
+        y1 = self.conv2(y0_x)
+
+        y1_0_x = torch.cat((x,y0,y1),dim=1)
+        y2 = self.conv3(y1_0_x)
+
+        y2_1_0_x = torch.cat((x,y0,y1,y2),dim=1)
+        y3 = self.conv4(y2_1_0_x)
+
+        y3_2_1_0_x = torch.cat((x,y0,y1,y2,y3),dim=1)
+        y4 = self.conv5(y3_2_1_0_x)
+        
+        return y4
+"""
+(2022,arXiv)STFT-Domain Neural Speech Enhancement with Very Low Algorithmic Latency
+https://arxiv.org/pdf/2204.09911.pdf
+...
+Each residual block in the encoder and decoder contains five depthwise separable 2D convolution (denoted as dsConv2D) blocks,
+where the dilation rate along time are respectively 1, 2, 4, 8
+and 16. Linear activation is used in the output layer to obtain
+the predicted RI components.
+...
+"""
+class ResBlock(nn.Module):
+    def __init__(self, n_channel,norm="BatchNorm2d",dropout=0.0,activation="PReLU"):
+        super().__init__()
+
+        ## Normalization
+        if norm == "BatchNorm2d": 
+            bn= nn.BatchNorm2d
+        else :
+            raise Exception("ERROR::ResBlock: unknown nromalization - {}".format(norm))
+
+        if activation == 'PReLU':
+            acti = nn.PReLU()
+        else :
+            raise Exception("ERROR::ResBlock:Unknown activation type " + str(activation))
+
+        dilations= [
+            (1,1),
+            (1,2),
+            (1,4),
+            (1,8),
+            (1,16)
+        ]
+
+        self.layers=[]
+        for i in range(5):
+            module = nn.Sequential(
+                    nn.Conv2d(n_channel,n_channel,
+                    (3,3),(1,1), # <- kernel should be (3,2)
+                    dilations[i],dilations[i],n_channel),
+                    nn.Conv2d(n_channel,n_channel,
+                    (1,1)),
+                    acti,
+                    bn(n_channel)
+                    )
+            self.add_module("res_{}".format(i),module)
+            self.layers.append(module)
+
+    def forward(self,x):
+
+        residual = self.layers[0](x)
+        for i in range(1,5):
+            residual = torch.add(residual,self.layers[i](residual))
+
+        return residual
