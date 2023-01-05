@@ -227,9 +227,11 @@ class ResUNetOnFreq(nn.Module) :
                  c_out = 1,
                  n_fft=512,
                  device="cuda:0",
-                 output="mapping",
                  print_shape=False,
-                 T=125
+                 T=125,
+                 n_block = 5,
+                 activation = "Softplus" , 
+                 Softplus_thr = 20,
                  ):
         super().__init__()
 
@@ -240,41 +242,26 @@ class ResUNetOnFreq(nn.Module) :
         self.F = n_hfft
         self.T = T
 
+        #f_dim = 30
         f_dim = 30
+
+        if n_block < 2 :
+            raise Exception("ERROR::ResUnetOnFreq : n_block({}) < 2".fomrat(n_block))
 
         ## Model Implementation
 
 
         # input layer
-        self.layer_data = nn.Sequential(
-            Encoder(c_in-2,20,(1,3),1,(0,1),1),
+        self.layer_input = nn.Sequential(
+            Encoder(c_in,f_dim,(1,3),1,(0,1),1),
             nn.LayerNorm(n_hfft) 
-        )
-        self.layer_AF = nn.Sequential(
-            Encoder(2,f_dim-20,(1,3),1,(0,1),1),
-            nn.LayerNorm(n_hfft)
         )
 
         # Encoder
         encoders=[]
-        encoders.append(ResBlock(30))
-        encoders.append(nn.Sequential(
-                    Encoder(f_dim,f_dim,(3,1),
-                    (2,1),(0,0),activation="PReLU"),
-                    ResBlock(30)))
-        encoders.append(nn.Sequential(
-                    Encoder(f_dim,f_dim,(3,1),
-                    (2,1),(0,0),activation="PReLU"),
-                    ResBlock(30)))
-        encoders.append(nn.Sequential(
-                    Encoder(f_dim,f_dim,(3,1),
-                    (2,1),(0,0),activation="PReLU"),
-                    ResBlock(30)))
-        encoders.append(nn.Sequential(
-                    Encoder(f_dim,f_dim,(3,1),
-                    (2,1),(0,0),activation="PReLU"),
-                    ResBlock(30)))
-        encoders.append(nn.Sequential(
+        encoders.append(ResBlock(f_dim))
+        for i in range(n_block) :
+            encoders.append(nn.Sequential(
                     Encoder(f_dim,f_dim,(3,1),
                     (2,1),(0,0),activation="PReLU"),
                     ResBlock(30)))
@@ -293,28 +280,21 @@ class ResUNetOnFreq(nn.Module) :
             (1,1),(0,0),activation="PReLU"))
         decoders.append(Decoder(64,f_dim,(4,1),
             (2,1),(1,0),output_padding=(1,0),activation="PReLU"))
+        
+        for i in range(n_block-2) :
+            decoders.append(nn.Sequential(
+                ResBlock(f_dim),
+                Decoder(f_dim,f_dim,(4,1),
+                (2,1),(1,0),output_padding=(1,0),activation="PReLU")))
         decoders.append(nn.Sequential(
-            ResBlock(30),
-            Decoder(f_dim,f_dim,(4,1),
-            (2,1),(1,0),output_padding=(1,0),activation="PReLU")))
+                ResBlock(f_dim),
+                Decoder(f_dim,f_dim,(5,1),
+                (2,1),(1,0),output_padding=(1,0),activation="PReLU")))
         decoders.append(nn.Sequential(
-            ResBlock(30),
-            Decoder(f_dim,f_dim,(4,1),
-            (2,1),(1,0),output_padding=(1,0), activation="PReLU")))
-        decoders.append(nn.Sequential(
-            ResBlock(30),
-            Decoder(f_dim,f_dim,(4,1),
-            (2,1),(1,0),output_padding=(1,0),activation="PReLU")))
-        decoders.append(nn.Sequential(
-            ResBlock(30),
-            Decoder(f_dim,f_dim,(4,1),
-            (2,1),(0,0),output_padding=(0,0),activation="PReLU")))
-        decoders.append(nn.Sequential(
-            ResBlock(30),
-            Decoder(f_dim,f_dim,(4,1),
-            (2,1),(1,0),output_padding=(1,0),activation="PReLU")))
-
-        decoders.append(ResBlock(30))
+                ResBlock(f_dim),
+                Decoder(f_dim,f_dim,(4,1),
+                (2,1),(1,0),output_padding=(1,0),activation="PReLU")))
+        decoders.append(ResBlock(f_dim))
 
         self.decoders=decoders
         for i,dec in enumerate(self.decoders) : 
@@ -325,11 +305,8 @@ class ResUNetOnFreq(nn.Module) :
         # Residual Path
         res_paths = []
         res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
-        res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
-        res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
-        res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
-        res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
-        res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
+        for i in range(n_block) : 
+            res_paths.append(Encoder(f_dim,f_dim,1,1,0,1,activation="PReLU"))
         res_paths.append(Encoder(64,64,1,1,0,1,activation="PReLU"))
         res_paths.append(Encoder(192,192,1,1,0,1,activation="PReLU"))
 
@@ -341,30 +318,33 @@ class ResUNetOnFreq(nn.Module) :
         self.bottleneck = nn.LSTM(192,300,3,batch_first=True,proj_size=192)
 
         # output layer
-        self.out_layer = nn.ConvTranspose2d(f_dim,2,(3,1),stride=1,padding=(1,0),dilation=1,output_padding=(0,0))
+        self.out_layer = nn.ConvTranspose2d(f_dim,c_out,(3,1),stride=1,padding=(1,0),dilation=1,output_padding=(0,0))
+
+        if activation == "Softplus" : 
+            self.activation_mask = nn.Softplus(threshold=Softplus_thr)
+        elif activation == "Sigmoid" : 
+            self.activation_mask = nn.Sigmoid()
+        else : 
+            self.activation_mask = nn.Softplus()
 
     def forward(self,input):
         ## ipnut : [ Batch Channel Freq Time]
         # reshape
         # [ B C T F]
-        feature = torch.permute(input[:,:-2,:,:],(0,1,3,2))
-        AF = torch.permute(input[:,-2:,:,:],(0,1,3,2))
-
-        # input
-        feature = self.layer_data(feature)
-        AF = self.layer_AF(AF)
+        feature = torch.permute(input[:,:,:,:],(0,1,3,2))
+        feature = self.layer_input(feature)
 
         # reshape
-        feature = torch.permute(feature,(0,1,3,2))
-        AF = torch.permute(AF,(0,1,3,2))
-        x = torch.cat((feature,AF),dim=1)
+        x = torch.permute(feature,(0,1,3,2))
 
         ## Encoder
         res=[]
         for i,enc in enumerate(self.encoders):
             x = enc(x)
-            #print("x_{} : {}".format(i,x.shape))
+            if self.print_shape : 
+                print("x_{} : {}".format(i,x.shape))
             res.append(x)
+
 
         ## bottleneck
         # [B,C,1,T] -> [B,C,T]
@@ -389,12 +369,17 @@ class ResUNetOnFreq(nn.Module) :
         y = x
 
         for i,dec in enumerate(self.decoders) : 
-            #print("y {} += r_{} : {}".format(y.shape,i,res[-1-i].shape))
+            if self.print_shape : 
+                print("y {} += r_{} : {}".format(y.shape,i,res[-1-i].shape))
             y  = torch.add(y,res[-1-i])
             y = dec(y)
-            #print("y_{} : {}".format(i,y.shape))
+            if self.print_shape : 
+                print("y_{} : {}".format(i,y.shape))
 
         ## output
         
         output = self.out_layer(y)
-        return output
+        return self.activation_mask(output)
+    
+    def output(self,mask,feature):
+        return mask * feature
