@@ -138,6 +138,8 @@ class Encoder(nn.Module):
             bn = nn.BatchNorm2d
         elif norm == "InstanceNorm2d":
             bn = nn.InstanceNorm2d
+        elif norm == "LayerNorm": 
+            bn = nn.LayerNorm
         else :
             raise Exception("ERROR::Encoder: unknown normalization - {}".format(norm))
 
@@ -154,6 +156,8 @@ class Encoder(nn.Module):
             self.acti = nn.PReLU()
         elif activation == 'ReLU':
             self.acti = nn.ReLU()
+        elif activation == 'GELU':
+            self.acti = nn.GELU()
         else :
             raise Exception("ERROR::Encoder:Unknown activation type " + str(activation))
         self.dropout = nn.Dropout(dropout)
@@ -166,11 +170,18 @@ class Encoder(nn.Module):
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride,padding=(0, 0),dilation=1,output_padding=(0,0),activation="LeakyReLU"):
+    def __init__(self, in_channels, out_channels, kernel_size, stride,padding=(0, 0),dilation=1,output_padding=(0,0),activation="LeakyReLU",norm="BatchNorm2d"):
         super().__init__()
        
         tconv = nn.ConvTranspose2d
-        bn = nn.BatchNorm2d
+        if norm == "BatchNorm2d": 
+            bn = nn.BatchNorm2d
+        elif norm == "InstanceNorm2d":
+            bn = nn.InstanceNorm2d
+        elif norm == "LayerNorm": 
+            bn = nn.LayerNorm
+        else :
+            raise Exception("ERROR::Encoder: unknown normalization - {}".format(norm))
         
         self.transconv = tconv(in_channels, out_channels, kernel_size=kernel_size, stride=stride, dilation=dilation, output_padding=output_padding,padding=padding)
         self.bn = bn(out_channels)
@@ -185,6 +196,8 @@ class Decoder(nn.Module):
             self.acti = nn.PReLU()
         elif activation == 'ReLU':
             self.acti = nn.ReLU()
+        elif activation == 'GELU':
+            self.acti = nn.GELU()
         else :
             raise Exception("ERROR::Encoder:Unknown activation type " + str(activation))
 
@@ -252,8 +265,6 @@ class ResPath(nn.Module):
         z4 = x4+y4
         return z4
 
-
-
 """
 https://arxiv.org/abs/1608.06993v5
 Huang, Gao, et al. "Densely connected convolutional networks." Proceedings of the IEEE conference on computer vision and pattern recognition. 2017.
@@ -289,6 +300,8 @@ class DenseBlock(nn.Module):
             self.acti = nn.PReLU()
         elif activation == 'ReLU':
             self.acti = nn.ReLU()
+        elif activation == 'GELU':
+            self.acti = nn.GELU()
         else :
             raise Exception("ERROR::Encoder:Unknown activation type " + str(activation))
 
@@ -339,6 +352,8 @@ class ResBlock(nn.Module):
 
         if activation == 'PReLU':
             acti = nn.PReLU()
+        elif activation == 'GELU':
+            self.acti = nn.GELU()
         else :
             raise Exception("ERROR::ResBlock:Unknown activation type " + str(activation))
 
@@ -371,3 +386,82 @@ class ResBlock(nn.Module):
             residual = torch.add(residual,self.layers[i](residual))
 
         return residual
+"""
+Choi, Hyeong-Seok, et al. "Real-time denoising and dereverberation wtih tiny recurrent u-net." ICASSP 2021-2021 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP). IEEE, 2021.
+
+https://github.com/YangangCao/TRUNet/blob/main/TRUNet.py
+"""
+class GRUBlock(nn.Module):
+    def __init__(self, in_channels, hidden_size, out_channels, bidirectional):
+        super(GRUBlock, self).__init__()
+        self.GRU = nn.GRU(in_channels, hidden_size, batch_first=True, bidirectional=bidirectional)
+        
+        self.conv = nn.Sequential(nn.Conv1d(hidden_size * (2 if bidirectional==True else 1), out_channels, kernel_size = 1),
+                    nn.BatchNorm1d(out_channels),
+                    nn.ReLU(inplace=True))
+
+    def forward(self, x):
+        output,h = self.GRU(x)
+        output = output.transpose(1,2)
+        output = self.conv(output)
+        return output
+
+"""
+by https://github.com/jzi040941
+"""
+class FGRUBlock(nn.Module):
+    def __init__(self, in_channels, hidden_size, out_channels):
+        super(FGRUBlock, self).__init__()
+        self.GRU = nn.GRU(
+            in_channels, hidden_size, batch_first=True, bidirectional=True
+        )
+        # the GRU is bidirectional -> multiply hidden_size by 2
+        self.conv = nn.Conv2d(hidden_size * 2, out_channels, kernel_size=1)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.hidden_size = hidden_size
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        """x has shape (batch * timesteps, number of features, feature_size)"""
+        # We want the FGRU to consider the F axis as the one that unrolls the sequence,
+        #  C the input_size, and BT the effective batch size --> x_.shape == (B,C,T,F)
+        B, C, T, F = x.shape
+        x_ = x.permute(0, 2, 3, 1)  # x_.shape == (B,T,F,C)
+        x_ = x_.reshape(B * T, F, C)
+        y, h = self.GRU(x_)  # x_.shape == (BT,F,C)
+        y = y.reshape(B, T, F, self.hidden_size * 2)
+        output = y.permute(0, 3, 1, 2)  # output.shape == (B,C,T,F)
+        output = self.conv(output)
+        output = self.bn(output)
+        return self.relu(output)
+
+
+class TGRUBlock(nn.Module):
+    def __init__(self, in_channels, hidden_size, out_channels, **kwargs):
+        super(TGRUBlock, self).__init__()
+        self.GRU = nn.GRU(in_channels, hidden_size, batch_first=True)
+        self.conv = nn.Conv2d(hidden_size, out_channels, kernel_size=1)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.hidden_size = hidden_size
+        self.relu = nn.ReLU()
+
+    def forward(self, x, rnn_state):
+        # We want the GRU to consider the T axis as the one that unrolls the sequence,
+        #  C the input_size, and BS the effective batch size --> x_.shape == (BS,T,C)
+        # B = batch_size, T = time_steps, C = num_channels, S = feature_size
+        #  (using S for feature_size because F is taken by nn.functional)
+        B, C, T, F = x.shape  # x.shape == (B, C, T, F)
+
+        # unpack, permute, and repack
+        x1 = x.permute(0, 3, 2, 1)  # x2.shape == (B,F,T,C)
+        x_ = x1.reshape(B * F, T, C)  # x_.shape == (BF,T,C)
+        # run GRU
+        y_, rnn_state = self.GRU(x_, rnn_state)  # y_.shape == (BF,T,C)
+        # unpack, permute, and repack
+        y1 = y_.reshape(B, F, T, self.hidden_size)  # y1.shape == (B,F,T,C)
+        y2 = y1.permute(0, 3, 2, 1)  # y2.shape == (B,C,T,F)
+
+        output = self.conv(y2)
+        output = self.bn(output)
+        output = self.relu(output)
+        return output, rnn_state
