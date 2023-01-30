@@ -1,7 +1,89 @@
 # Modules for UNet
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
+
+class DepthwiseSeparableConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super(DepthwiseSeparableConv2d, self).__init__()
+        
+        self.depthwise = nn.Conv2d(
+            in_channels=in_channels,  # because it passed already in the previous conv
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=in_channels,
+        )
+        self.bn_depth = nn.BatchNorm2d(out_channels)
+        self.pointwise = nn.Conv2d(out_channels, out_channels, kernel_size=1)
+        self.bn_point = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.bn_depth(x)
+        x = F.relu(x)
+
+        x = self.pointwise(x)
+        x = self.bn_point(x)
+        x = F.relu(x)
+        return x
+
+
+"""
+From https://github.com/JusperLee/AFRCNN-For-Speech-Separation
+"""
+class GlobalChannelLayerNorm(nn.Module):
+    '''
+        Global Layer Normalization
+    '''
+    def __init__(self, channel_size):
+        super(GlobalChannelLayerNorm, self).__init__()
+        self.channel_size = channel_size
+        self.gamma = nn.Parameter(torch.ones(channel_size),
+                                  requires_grad=True)
+        self.beta = nn.Parameter(torch.zeros(channel_size),
+                                 requires_grad=True)
+    
+    def apply_gain_and_bias(self, normed_x):
+        """ Assumes input of size `[batch, chanel, *]`. """
+        return (self.gamma * normed_x.transpose(1, -1) +
+                self.beta).transpose(1, -1)
+
+    def forward(self, x):
+        """
+        x: N x C x T
+        """
+        dims = list(range(1, len(x.shape)))
+        mean = x.mean(dim=dims, keepdim=True)
+        var = torch.pow(x - mean, 2).mean(dim=dims, keepdim=True)
+        return self.apply_gain_and_bias((x - mean) / (var + 1e-8).sqrt())
+"""
+Modified FFN Block of  
+Li, Kai, Runxuan Yang, and Xiaolin Hu. 
+"An efficient encoder-decoder architecture with top-down attention for speech separation."
+arXiv preprint arXiv:2209.15200 (2022).
+
+"""
+class MultiScaleConvBlock(nn.Module):
+    def __init__(self, in_channels) : 
+        super(MultiScaleConvBlock, self).__init__()
+        
+        self.net = nn.Sequential(
+                    nn.Conv2d(in_channels, in_channels*2, kernel_size=1),
+                    GlobalChannelLayerNorm(in_channels*2),
+                    DepthwiseSeparableConv2d(in_channels*2, in_channels*2, kernel_size=1),
+                    GlobalChannelLayerNorm(in_channels*2),
+                    nn.Conv2d(in_channels*2, in_channels, kernel_size=1),
+                    GlobalChannelLayerNorm(in_channels)
+        
+        )
+
+    def forward(self,x):
+        # x : [B, C, F, T]
+        x = self.net(x)
+        return x
 
 class ComplexConv2d(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, **kwargs):
@@ -406,8 +488,33 @@ class GRUBlock(nn.Module):
         output = self.conv(output)
         return output
 
+class LSTMBlock(nn.Module):
+    def __init__(self,n_dim,n_hidden,n_layer=3,proj_size=None,dropout=0.2) : 
+        super(LSTMBlock, self).__init__()
+        
+        if proj_size == None :
+            proj_size = n_dim
+        self.rnn = nn.LSTM(n_dim,n_hidden,n_layer,batch_first=True,proj_size=proj_size,dropout=dropout)
+    
+    def forward(self,x):
+        # [B,C,F',T] -> [B,C*F',T]
+        d0,d1,d2,d3 = x.shape
+        x = torch.reshape(x,(x.shape[0],x.shape[1]*x.shape[2],x.shape[3]))
+        # [B,C*F',T] -> [B,T,C*F']
+        x = torch.permute(x,(0,2,1))
+        #print("bottle in : {}".format(x.shape))
+
+        x = self.rnn(x)[0]
+
+        # [B,T,C*F'] -> [B,C*F',T]
+        x = torch.permute(x,(0,2,1))
+        # [B,C*F',T] -> [B,C,F',T]
+        x = torch.reshape(x,(d0,d1,d2,d3))
+        
+        return x
+    
 """
-by https://github.com/jzi040941
+Based on routine by https://github.com/jzi040941
 """
 class FGRUBlock(nn.Module):
     def __init__(self, in_channels, hidden_size, out_channels):
@@ -422,12 +529,11 @@ class FGRUBlock(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        """x has shape (batch * timesteps, number of features, feature_size)"""
-        # We want the FGRU to consider the F axis as the one that unrolls the sequence,
-        #  C the input_size, and BT the effective batch size --> x_.shape == (B,C,T,F)
-        B, C, T, F = x.shape
+        # X : [B, C, F', T]
+        # goal : [BT, F, C ]
+        B, C, T, F_ = x.shape
         x_ = x.permute(0, 2, 3, 1)  # x_.shape == (B,T,F,C)
-        x_ = x_.reshape(B * T, F, C)
+        x_ = x_.reshape(B * T, F_, C)
         y, h = self.GRU(x_)  # x_.shape == (BT,F,C)
         y = y.reshape(B, T, F, self.hidden_size * 2)
         output = y.permute(0, 3, 1, 2)  # output.shape == (B,C,T,F)
@@ -435,9 +541,8 @@ class FGRUBlock(nn.Module):
         output = self.bn(output)
         return self.relu(output)
 
-
 class TGRUBlock(nn.Module):
-    def __init__(self, in_channels, hidden_size, out_channels, **kwargs):
+    def __init__(self, in_channels, hidden_size, out_channels):
         super(TGRUBlock, self).__init__()
         self.GRU = nn.GRU(in_channels, hidden_size, batch_first=True)
         self.conv = nn.Conv2d(hidden_size, out_channels, kernel_size=1)
@@ -445,23 +550,141 @@ class TGRUBlock(nn.Module):
         self.hidden_size = hidden_size
         self.relu = nn.ReLU()
 
-    def forward(self, x, rnn_state):
-        # We want the GRU to consider the T axis as the one that unrolls the sequence,
-        #  C the input_size, and BS the effective batch size --> x_.shape == (BS,T,C)
-        # B = batch_size, T = time_steps, C = num_channels, S = feature_size
-        #  (using S for feature_size because F is taken by nn.functional)
-        B, C, T, F = x.shape  # x.shape == (B, C, T, F)
+    def forward(self, x, rnn_state=None):
+        """
+        X :[B, C, F', T]
+        
+        X' : [B*F', T, C']
+        """
+        B, C, F_, T = x.shape
+ 
+        # -> [B, F', T, C]
+        x = x.permute(0, 2, 3, 1)
+        # -> [B*F', T, C]
+        x = x.reshape(B * F_, T, C)
+ 
+            
+        x, rnn_state = self.GRU(x, rnn_state)  # y_.shape == (BF,T,C)
+        #  X' : [B*F', T, hidden_size]
+        # -> X' : [B, F', T, hidden_size]
+        print("TGRU::{}".format(x.shape))
+        x = x.reshape(B, F_, T, self.hidden_size)
+        # -> X' : [B, hidden_size, F', T]
+        x = x.permute(0, 3, 1, 2)     
+        #  X' : [B, C, F', T]
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x, rnn_state
 
-        # unpack, permute, and repack
-        x1 = x.permute(0, 3, 2, 1)  # x2.shape == (B,F,T,C)
-        x_ = x1.reshape(B * F, T, C)  # x_.shape == (BF,T,C)
-        # run GRU
-        y_, rnn_state = self.GRU(x_, rnn_state)  # y_.shape == (BF,T,C)
-        # unpack, permute, and repack
-        y1 = y_.reshape(B, F, T, self.hidden_size)  # y1.shape == (B,F,T,C)
-        y2 = y1.permute(0, 3, 2, 1)  # y2.shape == (B,C,T,F)
+#define custom_atan2 to support onnx conversion
+def custom_atan2(y, x):
+    pi = torch.from_numpy(np.array([np.pi])).to(y.device, y.dtype)
+    ans = torch.atan(y / (x + 1e-6))
+    ans += ((y > 0) & (x < 0)) * pi
+    ans -= ((y < 0) & (x < 0)) * pi
+    ans *= 1 - ((y > 0) & (x == 0)) * 1.0
+    ans += ((y > 0) & (x == 0)) * (pi / 2)
+    ans *= 1 - ((y < 0) & (x == 0)) * 1.0
+    ans += ((y < 0) & (x == 0)) * (-pi / 2)
+    return ans
 
-        output = self.conv(y2)
-        output = self.bn(output)
-        output = self.relu(output)
-        return output, rnn_state
+class MEA(nn.Module):
+    # class of mask estimation and applying
+    def __init__(self,in_channels=4, mag_f_dim=3):
+        super(MEA, self).__init__()
+        self.mag_mask = nn.Conv2d(
+            in_channels, mag_f_dim, kernel_size=(3, 1), padding=(1, 0))
+        self.real_mask = nn.Conv2d(in_channels, 1, kernel_size=(3, 1), padding=(1, 0))
+        self.imag_mask = nn.Conv2d(in_channels, 1, kernel_size=(3, 1), padding=(1, 0))
+        kernel = torch.eye(mag_f_dim)
+        kernel = kernel.reshape(mag_f_dim, 1, mag_f_dim, 1)
+        self.register_buffer('kernel', kernel)
+        self.mag_f_dim = mag_f_dim
+    
+    def forward(self, x):
+        mag_mask = self.mag_mask(x)
+        real_mask = self.real_mask(x).squeeze(1)
+        imag_mask = self.imag_mask(x).squeeze(1)
+
+        return (mag_mask,real_mask,imag_mask)
+
+    def output(self,mask,feature,eps=1e-9) :
+        mag_mask  = mask[0]
+        real_mask = mask[1]
+        imag_mask = mask[2]
+
+        # feature [B,C,F,T]
+        mag = torch.norm(feature, dim=-1)
+        pha = custom_atan2(feature[..., 1], feature[..., 0])
+
+        # stage 1
+        mag_pad = F.pad(
+            mag[:, None], [0, 0, (self.mag_f_dim-1)//2, (self.mag_f_dim-1)//2])
+        mag = F.conv2d(mag_pad, self.kernel)
+        mag = mag * mag_mask.relu()
+        mag = mag.sum(dim=1)
+
+        # stage 2
+        mag_mask = torch.sqrt(torch.clamp(real_mask**2+imag_mask**2, eps))
+        pha_mask = custom_atan2(imag_mask+eps, real_mask+eps)
+        real = mag * mag_mask.relu() * torch.cos(pha+pha_mask)
+        imag = mag * mag_mask.relu() * torch.sin(pha+pha_mask)
+        return torch.stack([real, imag], dim=-1)
+    
+
+
+
+"""
+From https://github.com/JusperLee/AFRCNN-For-Speech-Separation
+"""
+class GlobalChannelLayerNorm(nn.Module):
+    '''
+        Global Layer Normalization
+    '''
+    def __init__(self, channel_size):
+        super(GlobalChannelLayerNorm, self).__init__()
+        self.channel_size = channel_size
+        self.gamma = nn.Parameter(torch.ones(channel_size),
+                                  requires_grad=True)
+        self.beta = nn.Parameter(torch.zeros(channel_size),
+                                 requires_grad=True)
+    
+    def apply_gain_and_bias(self, normed_x):
+        """ Assumes input of size `[batch, chanel, *]`. """
+        return (self.gamma * normed_x.transpose(1, -1) +
+                self.beta).transpose(1, -1)
+
+    def forward(self, x):
+        """
+        x: N x C x T
+        """
+        dims = list(range(1, len(x.shape)))
+        mean = x.mean(dim=dims, keepdim=True)
+        var = torch.pow(x - mean, 2).mean(dim=dims, keepdim=True)
+        return self.apply_gain_and_bias((x - mean) / (var + 1e-8).sqrt())
+"""
+Modified FFN Block of  
+Li, Kai, Runxuan Yang, and Xiaolin Hu. 
+"An efficient encoder-decoder architecture with top-down attention for speech separation."
+arXiv preprint arXiv:2209.15200 (2022).
+
+"""
+class MultiScaleConvBlock(nn.Module):
+    def __init__(self, in_channels) : 
+        super(MultiScaleConvBlock, self).__init__()
+        
+        self.net = nn.Sequential(
+                    nn.Conv2d(in_channels, in_channels*2, kernel_size=1),
+                    GlobalChannelLayerNorm(in_channels*2),
+                    DepthwiseSeparableConv2d(in_channels*2, in_channels*2, kernel_size=1),
+                    GlobalChannelLayerNorm(in_channels*2),
+                    nn.Conv2d(in_channels*2, in_channels, kernel_size=1),
+                    GlobalChannelLayerNorm(in_channels)
+        
+        )
+
+    def forward(self,x):
+        # x : [B, C, F, T]
+        x = self.net(x)
+        return x
