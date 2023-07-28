@@ -100,8 +100,88 @@ class ComplexConv2d(nn.Module):
         imaginary = self.conv_re(x[..., 1]) + self.conv_im(x[..., 0])
         output = torch.stack((real, imaginary), dim=-1)
         return output
-
+    
 class ComplexConvTranspose2d(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0, output_padding=0, dilation=1, groups=1, bias=True, **kwargs):
+        super().__init__()
+
+        ## Model components
+        self.tconv_re = nn.ConvTranspose2d(in_channel, out_channel,
+                                           kernel_size=kernel_size,
+                                           stride=stride,
+                                           padding=padding,
+                                           output_padding=output_padding,
+                                           groups=groups,
+                                           bias=bias,
+                                           dilation=dilation,
+                                           **kwargs)
+        self.tconv_im = nn.ConvTranspose2d(in_channel, out_channel,
+                                           kernel_size=kernel_size,
+                                           stride=stride,
+                                           padding=padding,
+                                           output_padding=output_padding,
+                                           groups=groups,
+                                           bias=bias,
+                                           dilation=dilation,
+                                           **kwargs)
+
+    def forward(self, x):  # shpae of x : [batch,channel,axis1,axis2,2]
+        real = self.tconv_re(x[..., 0]) - self.tconv_im(x[..., 1])
+        imaginary = self.tconv_re(x[..., 1]) + self.tconv_im(x[..., 0])
+        output = torch.stack((real, imaginary), dim=-1)
+        return output
+    
+class ComplexDepthSeparable(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=None, dilation=1, groups=1, bias=True, **kwargs):
+        super().__init__()
+
+        if padding is None:
+            padding = [(i - 1) // 2 for i in kernel_size]  # 'SAME' padding
+
+        ## Model components
+        self.depth_re = nn.Conv2d(in_channel, in_channel, kernel_size, stride=stride, padding=padding,
+                                 dilation=dilation, groups=groups, bias=bias, **kwargs)
+        self.depth_im = nn.Conv2d(in_channel, in_channel, kernel_size, stride=stride, padding=padding,
+                                 dilation=dilation, groups=groups, bias=bias, **kwargs)
+        
+        self.point_re = nn.Conv2d(in_channel,out_channel,kernel_size=1)
+        self.point_im = nn.Conv2d(in_channel,out_channel,kernel_size=1)
+
+        self.bn_re = nn.BatchNorm2d(in_channel)
+        self.bn_im = nn.BatchNorm2d(in_channel)
+
+        self.prelu_re = nn.PReLU()
+        self.prelu_im = nn.PReLU()
+
+    def forward(self, x):  # shpae of x : [batch,channel,axis1,axis2,2]
+        rr = self.depth_re(x[...,0])
+        rr = self.bn_re(rr)
+        rr = self.point_re(rr)
+
+        ir = self.depth_re(x[...,1])
+        ir = self.bn_re(ir)
+        ir = self.point_re(ir)
+
+        ii = self.depth_im(x[...,1])
+        ii = self.bn_im(ii)
+        ii = self.point_im(ii)
+
+        ri = self.depth_im(x[...,0])
+        ri = self.bn_im(ri)
+        ri = self.point_im(ri)
+
+        real = rr - ii
+        imaginary = ri + ir
+
+        real = self.prelu_re(real)
+        imaginary = self.prelu_im(imaginary)
+
+        output = torch.stack((real, imaginary), dim=-1)
+        return output
+
+
+## TODO : Not implemented
+class ComplexTransposeDepthSeparable(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding=0, output_padding=0, dilation=1, groups=1, bias=True, **kwargs):
         super().__init__()
 
@@ -209,7 +289,7 @@ class OberservedAddition(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding=None, dilation=1,norm="BatchNorm2d",padding_mode="zeros",dropout=0,activation="LeakyReLU"):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding=None, dilation=1,norm="BatchNorm2d",padding_mode="zeros",dropout=0.0,activation="LeakyReLU"):
         super().__init__()
         if padding is None:
             padding = [(i - 1) // 2 for i in kernel_size]  # 'SAME' padding
@@ -246,9 +326,9 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.dropout(x)
         x = self.bn(x)
         x = self.acti(x)
-        x = self.dropout(x)
         return x
 
 class Decoder(nn.Module):
@@ -468,6 +548,9 @@ class ResBlock(nn.Module):
             residual = torch.add(residual,self.layers[i](residual))
 
         return residual
+    
+
+
 """
 Choi, Hyeong-Seok, et al. "Real-time denoising and dereverberation wtih tiny recurrent u-net." ICASSP 2021-2021 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP). IEEE, 2021.
 
@@ -589,6 +672,9 @@ def custom_atan2(y, x):
     ans += ((y < 0) & (x == 0)) * (-pi / 2)
     return ans
 
+"""
+G. Zhang, L. Yu, C. Wang and J. Wei, "Multi-Scale Temporal Frequency Convolutional Network With Axial Attention for Speech Enhancement," ICASSP 2022 - 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), Singapore, Singapore, 2022, pp. 9122-9126, doi: 10.1109/ICASSP43922.2022.9746610.
+"""
 class MEA(nn.Module):
     # class of mask estimation and applying
     def __init__(self,in_channels=4, mag_f_dim=3):
@@ -688,3 +774,4 @@ class MultiScaleConvBlock(nn.Module):
         # x : [B, C, F, T]
         x = self.net(x)
         return x
+    
