@@ -223,6 +223,19 @@ class ComplexBatchNorm2d(nn.Module):
         imag = self.bn_im(x[..., 1])
         output = torch.stack((real, imag), dim=-1)
         return output
+    
+class ComplexInstanceNorm2d(nn.Module):
+    def __init__(self, num_features,):
+        super().__init__()
+        self.in_re = nn.InstanceNorm2d(num_features=num_features)
+        self.in_im = nn.InstanceNorm2d(num_features=num_features)
+
+    def forward(self, x):
+        real = self.in_re(x[..., 0])
+        imag = self.in_im(x[..., 1])
+        output = torch.stack((real, imag), dim=-1)
+        return output
+
 
 ## Uformer Modules
 ## https://arxiv.org/pdf/2111.06015.pdf
@@ -718,7 +731,6 @@ class MEA(nn.Module):
         imag = mag * mag_mask.relu() * torch.sin(pha+pha_mask)
         return torch.stack([real, imag], dim=-1)
     
-
 
 
 """

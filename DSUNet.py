@@ -82,6 +82,8 @@ class Encoder(nn.Module):
             self.relu = nn.PReLU()
         elif activation == "SiLU" :
             self.relu = nn.SiLU()
+        elif activation == "Softplus" :
+            self.relu = nn.Softplus()
 
     def forward(self, x):
         x = self.conv(x)
@@ -89,6 +91,85 @@ class Encoder(nn.Module):
         x = self.bn(x)
         x = self.relu(x)
         return x
+    
+
+
+# Conv Next Style DepthWise Separable Encoder
+class EncoderDWN(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, padding=None, padding_mode="zeros",activation="LeakyReLU",dropout=0.0,type_norm = "BatchNorm2d"):
+        super().__init__()
+        if padding is None:
+            padding = [(i - 1) // 2 for i in kernel_size]  # 'SAME' padding
+       
+        conv = nn.Conv2d
+        if type_norm == "BatchNorm2d" : 
+            bn = nn.BatchNorm2d
+        elif type_norm == "InstanceNorm2d" :
+            bn = nn.InstanceNorm2d
+
+        self.dr = nn.Dropout(dropout)
+
+        self.conv_depth = conv(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, padding_mode=padding_mode)
+        self.conv_point = conv(in_channels, out_channels, kernel_size=1, stride=1, padding=0, padding_mode=padding_mode)
+        self.bn = bn(out_channels)
+
+        if activation == "LeakyReLU" : 
+            self.relu = nn.LeakyReLU(inplace=True)
+        elif activation == "PReLU" :
+            self.relu = nn.PReLU()
+        elif activation == "SiLU" :
+            self.relu = nn.SiLU()
+        elif activation == "Softplus" :
+            self.relu = nn.Softplus()
+
+    def forward(self, x):
+        x = self.conv_depth(x)
+        x = self.dr(x)
+        x = self.bn(x)
+        x = self.conv_point(x)
+        x = self.relu(x)
+        return x
+    
+# Gate Convolution Layer
+class GConv(nn.Module):
+    def __init__(self,in_channels, out_channels, kernel_size, stride=1, padding=0,  groups=1,type_norm = "BatchNorm2d",activation="ReLU",dropout=0.0):
+        super(GConv,self).__init__()
+        
+        self.c = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding,  groups=groups)
+        self.m = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding,  groups=groups),
+            nn.Sigmoid()
+            )
+        
+        if type_norm == "BatchNorm2d" : 
+            self.norm= nn.BatchNorm2d(out_channels)
+        elif type_norm == "InstanceNorm2d" : 
+            self.norm= nn.InstanceNorm2d(out_channels,track_running_stats=True)
+        else :
+            self.norm= nn.Identity()
+
+        if activation == "ReLU" : 
+            self.activation = torch.nn.ReLU()
+        elif activation == "SiLU":
+            self.activation = torch.nn.SiLU()
+        elif activation == "ELU":
+            self.activation = torch.nn.ELU()
+        elif activation == "Softplus" : 
+            self.activation = torch.nn.Softplus()
+        elif activation == "PReLU":
+            self.activation = torch.nn.PReLU()
+        elif activation == "LeakyReLU" :
+            self.activation = torch.nn.LeakyReLU()
+        
+    def forward(self, x): 
+        m = self.m(x)
+        x = self.c(x)
+
+        y = m*x
+        y = self.norm(y)
+        y = self.activation(y)
+        
+        return y
 
 class Decoder(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, output_padding,padding=(0, 0), activation = "LeakyReLU",type_norm = "BatchNorm2d"):
@@ -109,12 +190,93 @@ class Decoder(nn.Module):
             self.relu = nn.PReLU()
         elif activation == "SiLU" :
             self.relu = nn.SiLU()
+        elif activation == "Softplus" :
+            self.relu = nn.Softplus()
 
     def forward(self, x):
         x = self.transconv(x)
         x = self.bn(x)
         x = self.relu(x)
         return x
+    
+class DecoderDWN(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, output_padding,padding=(0,0),type_norm = "BatchNorm2d",activation = "ReLU"):
+        super(DecoderDWN, self).__init__()
+        self.out_channels = out_channels
+        self.conv_point = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+
+        if type_norm == "BatchNorm2d" : 
+            self.norm_point = nn.BatchNorm2d(out_channels)
+        elif type_norm == "InstanceNorm2d" : 
+            self.norm_point = nn.InstanceNorm2d(out_channels,track_running_stats=True)
+        else :
+            self.norm_point = nn.Identity()
+
+        self.conv_up = nn.ConvTranspose2d(
+            in_channels=out_channels,  # because it passed already in the previous conv
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            output_padding=output_padding
+        )
+
+        if activation == "LeakyReLU" : 
+            self.activation= nn.LeakyReLU(inplace=True)
+        elif activation == "ReLU" : 
+            self.activation = torch.nn.ReLU()
+        elif activation == "SiLU":
+            self.activation = torch.nn.SiLU()
+        elif activation == "Softplus" :
+            self.relu = nn.Softplus()
+
+    def forward(self, x):
+        x = self.conv_point(x)
+        x = self.norm_point(x)
+        x = self.conv_up(x)
+        #x = F.gelu(x)
+        x = self.activation(x)
+        return x
+    
+class TrGConv(nn.Module):
+    def __init__(self,in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, groups=1,type_norm = "BatchNorm2d",activation = "ReLU",dropout=0.0):
+        super(TrGConv,self).__init__()
+        
+        self.c = nn.ConvTranspose2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, output_padding=output_padding, groups=groups)
+        self.m = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, output_padding=output_padding, groups=groups),
+            nn.Sigmoid()
+            )
+        
+        if type_norm == "BatchNorm2d" : 
+            self.norm_point = nn.BatchNorm2d(out_channels)
+        elif type_norm == "InstanceNorm2d" : 
+            self.norm_point = nn.InstanceNorm2d(out_channels,track_running_stats=True)
+        else :
+            self.norm_point = nn.Identity()
+
+        if activation == "ReLU" : 
+            self.activation = torch.nn.ReLU()
+        elif activation == "SiLU":
+            self.activation = torch.nn.SiLU()
+        elif activation == "Softplus" : 
+            self.activation = torch.nn.Softplus()
+        elif activation == "ELU":
+            self.activation = torch.nn.ELU()
+        elif activation == "PReLU":
+            self.activation = torch.nn.PReLU()
+        elif activation == "LeakyReLU" :
+            self.activation = torch.nn.LeakyReLU()
+        
+    def forward(self, x): 
+        m = self.m(x)
+        x = self.c(x)
+        
+        return m*x 
+
+
+    
+
     
 class TGRUBlock(nn.Module):
     def __init__(self, in_channels, hidden_size, out_channels, skipGRU=False,**kwargs):
@@ -132,10 +294,10 @@ class TGRUBlock(nn.Module):
 
     # x : torch.Size([B, C=128, F=2, T=16, RI=2])
     def forward(self, x, rnn_state=None):
-        B, C, F, T = x.shape  # x.shape == (B, C, T, F)
+        B, C, F, T = x.shape  # x.shape == (B, C, F, T)
 
         # unpack, permute, and repack
-        x1 = x.permute(0, 2, 3, 1)  # x2.shape == (B,F,T,C,2)
+        x1 = x.permute(0, 2, 3, 1)  # x2.shape == (B,F,T,C)
         x_ = x1.reshape(B * F, T, C)  # x_.shape == (BF,T,C*2)
 
         # run GRU
@@ -149,6 +311,42 @@ class TGRUBlock(nn.Module):
         output = self.relu(output)
         return output
     
+
+################ Reisudal Connection
+
+class SEBlock(nn.Module) :
+    def __init__(self,in_channel,ratio=16):
+        super().__init__()
+        
+        size_se = int(in_channel/ratio)
+       
+        self.pool = torch.nn.AdaptiveAvgPool2d((1,1))
+            # Squeeze
+        self.squeeze = nn.Linear(in_channel,size_se)
+        self.relu = nn.ReLU()
+            # Excitation
+        self.excitation = nn.Linear(size_se,in_channel)
+        self.sigmoid = nn.Sigmoid()
+        
+    def forward(self,x):
+        # x : [B,C,F,T]
+        
+        
+        x_ = self.pool(x)
+        x_ = x_.permute(0,2,3,1)
+        
+        x_ = self.squeeze(x_)
+        x_ = self.relu(x_)
+        x_ = self.excitation(x_)
+        x_ = self.sigmoid(x_)
+        x_ = x_.permute(0,3,1,2)
+        x = x*x_
+        
+       
+        return x
+
+################ Output
+    
 # omplex Ratio Mask
 class CRM(nn.Module):
     def __init__(self):
@@ -156,6 +354,34 @@ class CRM(nn.Module):
     
     def forward(self,x):
         mask = torch.tanh(x)
+        mask = mask[:,0,...] + 1j*mask[:,1,...]
+
+        return mask
+    
+    def output(self,X,M):
+        return X*M
+    
+class CRM_sig(nn.Module):
+    def __init__(self):
+        super(CRM_sig,self).__init__()
+    
+    def forward(self,x):
+        mask = torch.sigmoid(x)
+        mask = mask[:,0,...] + 1j*mask[:,1,...]
+
+        return mask
+    
+    def output(self,X,M):
+        return X*M
+    
+class CRM_soft(nn.Module):
+    def __init__(self):
+        super(CRM_soft,self).__init__()
+
+        self.masking = nn.Softplus()
+    
+    def forward(self,x):
+        mask = self.masking(x)
         mask = mask[:,0,...] + 1j*mask[:,1,...]
 
         return mask
@@ -240,6 +466,7 @@ class CMEA(nn.Module):
 
 class DSUNet(nn.Module):
     def __init__(self, 
+                 architecture,
                  input_channels=8,
                  n_fft=512,
                  #model_complexity=45,
@@ -249,7 +476,9 @@ class DSUNet(nn.Module):
                  type_masking = "CRM",
                  activation = "LeakyReLU",
                  dropout=0.0,
-                 type_norm = "BatcNorm2d"
+                 type_norm = "BatcNorm2d",
+                 type_encoder = "Encoder",
+                 type_residual = "None"
                  ):
         super().__init__()
 
@@ -260,29 +489,38 @@ class DSUNet(nn.Module):
 
         print("DSUNet::complexity {}".format(model_complexity))
 
-        model_depth=20
-
-        self.set_size(model_complexity=model_complexity, input_channels=input_channels, model_depth=model_depth)
-        self.model_length = model_depth // 2
         self.dropout = dropout
 
         ## Encoder
         self.encoders = []
-        module_cls = Encoder
+        if type_encoder == "Encoder" : 
+            module_cls = Encoder
+        elif type_encoder == "EncoderDWN" : 
+            module_cls = EncoderDWN
+        elif type_encoder == "GConv" : 
+            module_cls = GConv
+        else :
+            raise Exception("Not Implemented Encoder")
+        
+        self.n_layer= len(architecture["encoder"])
 
-        for i in range(self.model_length):
-            module = module_cls(self.enc_channels[i], self.enc_channels[i + 1], kernel_size=self.enc_kernel_sizes[i],stride=self.enc_strides[i], padding=self.enc_paddings[i], padding_mode=padding_mode,dropout = dropout,activation=activation,type_norm = type_norm)
+        for i in range(self.n_layer):
+            module = module_cls(**architecture["encoder"]["enc{}".format(i+1)])
             self.add_module("encoder{}".format(i), module)
             self.encoders.append(module)
 
         ## Decoder
         self.decoders = []
-
-        for i in range(self.model_length):
-            module = Decoder(self.dec_channels[i] + self.enc_channels[self.model_length - i], self.dec_channels[i + 1], kernel_size=self.dec_kernel_sizes[i],
-                             stride=self.dec_strides[i], padding=self.dec_paddings[i], output_padding=self.dec_output_paddings[i],
-                             activation=activation
-                             )
+        if type_encoder == "Encoder" : 
+            module_cls = Decoder
+        elif type_encoder == "EncoderDWN" : 
+            module_cls = DecoderDWN
+        elif type_encoder == "GConv" : 
+            module_cls = TrGConv
+        else :
+            raise Exception("Not Implemented Decoder")
+        for i in range(self.n_layer):
+            module = module_cls(**architecture["decoder"]["dec{}".format(self.n_layer - i)])
             self.add_module("decoder{}".format(i), module)
             self.decoders.append(module)
 
@@ -291,21 +529,31 @@ class DSUNet(nn.Module):
             self.BTN = TGRUBlock(128,128,128)
         else :
             self.BTN = nn.Identity()
+
+        # Reisuadl Connection
+        self.res = []
+        for i in range(self.n_layer-1) :
+            if type_residual == "SE" :
+                module = SEBlock(architecture["encoder"]["enc{}".format(i+1)]["out_channels"])
+            else :
+                module = nn.Identity()
+            self.add_module("res{}".format(i), module)
+            self.res.append(module)
             
         ## Attractor
         self.Attractor = Attractor(n_ch=4,n_fft=n_fft)
 
         self.attractEncoders = [] 
-        for i in range(self.model_length) : 
+        for i in range(self.n_layer) : 
             module = AttractEncoder(
-                n_ch= self.enc_channels[i+1]
+                n_ch= architecture["encoder"]["enc{}".format(i+1)]["out_channels"]
             )
             self.add_module("attractEncoder_{}".format(i),module)
             self.attractEncoders.append(module)
 
 
         conv = nn.Conv2d
-        linear = conv(self.dec_channels[-1], 2, 1)
+        linear = conv(architecture["decoder"]["dec1"]["out_channels"], 2, 1)
 
         ## Mask Estimator
         self.add_module("linear", linear)
@@ -313,6 +561,10 @@ class DSUNet(nn.Module):
 
         if type_masking == "CRM" : 
             self.mask = CRM()
+        elif type_masking == "CRM_sig" : 
+            self.mask = CRM_sig()
+        elif type_masking == "CRM_soft" :
+            self.mask = CRM_soft()
         elif type_masking == "CMEA" : 
             self.mask = CMEA()
         elif type_masking == "CM" : 
@@ -325,6 +577,7 @@ class DSUNet(nn.Module):
         self.decoders = nn.ModuleList(self.decoders)
         self.encoders = nn.ModuleList(self.encoders)
         self.attractors = nn.ModuleList(self.attractEncoders)
+        self.res= nn.ModuleList(self.res)
 
     def forward(self, sf,SV,theta):        
         # ipnut : [ Batch Channel Freq Time 2]
@@ -335,7 +588,10 @@ class DSUNet(nn.Module):
         # Encoders
         sf_skip = []
         for i, encoder in enumerate(self.encoders):
-            sf_skip.append(sf)
+            if i != self.n_layer - 1:
+                sf_skip.append(self.res[i](sf))
+            else : 
+                sf_skip.append(sf)
             sf = encoder(sf)
             sf = self.dr(sf)
             #print("sf{}".format(i), sf.shape)
@@ -359,11 +615,11 @@ class DSUNet(nn.Module):
         # Decoders
         for i, decoder in enumerate(self.decoders):
             p = decoder(p)
-            if i == self.model_length - 1:
+            if i == self.n_layer - 1:
                 break
-            #print(f"p{i}, {p.shape} + sf{self.model_length - 1 - i}, {sf_skip[self.model_length - 1 -i].shape}, padding {self.dec_paddings[i]}")
+            #print(f"p{i}, {p.shape} + sf{self.n_layer - 1 - i}, {sf_skip[self.n_layer - 1 -i].shape}")
             
-            p = torch.cat([p, sf_skip[self.model_length - 1 - i]], dim=1)
+            p = torch.cat([p, sf_skip[self.n_layer - 1 - i]], dim=1)
 
         #print(p.shape)
         p = self.linear(p)
@@ -374,111 +630,10 @@ class DSUNet(nn.Module):
     def masking(self,X,M):
         return self.mask.output(X,M)
 
-    def set_size(self, model_complexity, model_depth=20, input_channels=1):
-        self.enc_channels = [input_channels,
-                                model_complexity,
-                                model_complexity,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                128]
 
-        self.enc_kernel_sizes = [(7, 1),
-                                    (1, 7),
-                                    (7, 5),
-                                    (7, 5),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3)]
-
-        self.enc_strides = [(1, 1),
-                            (1, 1),
-                            (2, 2),
-                            (2, 1),
-                            (2, 2),
-                            (2, 1),
-                            (2, 2),
-                            (2, 1),
-                            (2, 2),
-                            (2, 1)]
-
-        self.enc_paddings = [(3, 0),
-                                (0, 3),
-                                (3, 2),
-                                (3, 2),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),]
-                            
-        self.dec_channels = [0,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2,
-                                model_complexity * 2]
-
-        self.dec_kernel_sizes = [(5, 3),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3),
-                                    (5, 3), 
-                                    (7, 5), 
-                                    (7, 5), 
-                                    (1, 7),
-                                    (7, 1)]
-
-        self.dec_strides = [(2, 1),
-                            (2, 2),
-                            (2, 1),
-                            (2, 2),
-                            (2, 1),
-                            (2, 2),
-                            (2, 1),
-                            (2, 2),
-                            (1, 1),
-                            (1, 1)]
-
-        self.dec_paddings = [(2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (2, 1),
-                                (3, 2),
-                                (3, 2),
-                                (0, 3),
-                                (3, 0)]
-        
-        self.dec_output_paddings = [(0,0),
-                                    (0,1),
-                                    (0,0),
-                                    (0,1),
-                                    (0,0),
-                                    (0,1),
-                                    (0,0),
-                                    (0,1),
-                                    (0,0),
-                                    (0,0)]
-        
 class DSUNet_helper(nn.Module):
     def __init__(self,
+                 architecture,
                  n_fft = 512,
                  dropout = 0.0,
                  bottleneck = "None",
@@ -489,7 +644,9 @@ class DSUNet_helper(nn.Module):
                  DSB = False,
                  activation= "LeakyReLU",
                  type_norm ="BatchNorm2d",
-                 type_masking="CRM"
+                 type_masking="CRM",
+                 type_encoder = "Encoder",
+                 type_residual = "None"
                  ):
         super(DSUNet_helper,self).__init__()
 
@@ -501,7 +658,7 @@ class DSUNet_helper(nn.Module):
         model_channel = self.n_channel*2
 
         if DSB :
-            model_channel += 1
+            model_channel += 2
 
         self.mag_phase = mag_phase
 
@@ -509,13 +666,17 @@ class DSUNet_helper(nn.Module):
         self.corr = corr 
         self.DSB = DSB
 
-        self.net = DSUNet(input_channels = model_channel,
+        self.net = DSUNet(
+                        architecture=architecture,
+                        input_channels = model_channel,
                         dropout = dropout,
                         bottleneck=bottleneck,
                         model_complexity=model_complexity,
                         activation=activation,
                         type_norm = type_norm,
-                        type_masking=type_masking
+                        type_masking=type_masking,
+                        type_encoder=type_encoder,
+                        type_residual=type_residual
                         )
         
         # const
@@ -553,10 +714,8 @@ class DSUNet_helper(nn.Module):
         if self.DSB : 
             # B,F,T
             DSB = self.delay_n_sum(X,angle,mic_pos)
-            # B,F,T,2
-            DSB = torch.stack((DSB.real,DSB.imag),dim=-1)
-            # B,1,F,T,2
-            DSB = torch.unsqueeze(DSB,1)
+            # B,2,F,T
+            DSB = torch.stack((DSB.real,DSB.imag),dim=1)
 
             # B,C+1,F,T,2
             spectral_feature = torch.cat((spectral_feature,DSB),dim=1)
